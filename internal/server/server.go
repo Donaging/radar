@@ -57,6 +57,7 @@ import (
 	"github.com/skyhook-io/radar/internal/traffic"
 	"github.com/skyhook-io/radar/internal/updater"
 	"github.com/skyhook-io/radar/internal/upgrade"
+	"github.com/skyhook-io/radar/internal/usagedata"
 	"github.com/skyhook-io/radar/internal/version"
 	"github.com/skyhook-io/radar/pkg/argoapi"
 	"github.com/skyhook-io/radar/pkg/conditions"
@@ -90,6 +91,7 @@ type Server struct {
 	mcpInvestigationHandler http.Handler
 	diagConfig              *DiagConfig
 	effectiveConfig         *config.Config // running config for GET /api/config
+	stopUsageData           context.CancelFunc
 	openCostCurrency        *opencost.CurrencyResolver
 	currencyManaged         bool
 	prometheusConfigMu      sync.Mutex
@@ -442,6 +444,7 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 	// Middleware (applied to all routes)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(s.usageMiddleware)
 	r.Use(s.protectUnauthenticatedLoopback)
 	// Note: Timeout middleware is applied per-group below to exempt streaming endpoints
 
@@ -845,6 +848,12 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 			r.Get("/settings", s.handleGetSettings)
 			r.Put("/settings", s.handlePutSettings)
 
+			// Opt-in usage data: decision, report preview, and view counts
+			r.Get("/usage-data", s.handleGetUsageData)
+			r.Put("/usage-data", s.handlePutUsageData)
+			r.Post("/usage-data/event", s.handleUsageEvent)
+			r.Post("/usage-data/prompt-shown", s.handleUsagePromptShown)
+
 			// Config (persisted startup configuration)
 			r.Get("/config", s.handleGetConfig)
 			r.Put("/config", s.handlePutConfig)
@@ -1137,6 +1146,7 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 		}
 	}
 	s.broadcaster.Start()
+	s.startUsageData()
 
 	if ready != nil {
 		close(ready)
@@ -1239,6 +1249,10 @@ func (s *Server) Stop() {
 		s.aiRuns.Shutdown() // cancel investigations so agent children don't outlive us
 	}
 	s.broadcaster.Stop()
+	if s.stopUsageData != nil {
+		s.stopUsageData()
+	}
+	usagedata.Shutdown()
 	if s.listener != nil {
 		s.listener.Close()
 	}
