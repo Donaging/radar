@@ -60,7 +60,7 @@ export function ResourceBar({
   label,
 }: ResourceBarProps) {
   const track = (
-    <div className={clsx('relative', layout === 'inline' && 'min-w-0 flex-1')}>
+    <div className={clsx('relative', layout === 'inline' && 'min-w-16 flex-1')}>
       <div className={clsx('rounded-full border border-theme-border bg-theme-elevated overflow-hidden', layout === 'inline' ? 'h-1' : 'h-1.5')}>
         <div
           className={clsx('h-full rounded-full transition-[width] duration-300 ease-out', getBarColor(percent, colorScheme))}
@@ -78,7 +78,7 @@ export function ResourceBar({
 
   const bar =
     layout === 'inline' ? (
-      <div className="flex items-center gap-1.5 min-w-0">
+      <div className={clsx('flex items-center gap-1.5 min-w-0', tooltip && 'w-full')}>
         <span className="w-7 shrink-0 text-[10px] font-medium uppercase tracking-wide text-theme-text-tertiary">{label}</span>
         {track}
         <span className="w-8 shrink-0 text-right text-[10.5px] font-mono tabular-nums text-theme-text-secondary">
@@ -86,7 +86,7 @@ export function ResourceBar({
         </span>
       </div>
     ) : (
-      <div className="flex flex-col gap-0.5 min-w-0">
+      <div className={clsx('flex flex-col gap-0.5 min-w-0', tooltip && 'w-full')}>
         <div className="flex items-baseline justify-between gap-1">
           <span className="text-xs font-mono text-theme-text-secondary truncate">
             {used} / {total}
@@ -99,11 +99,17 @@ export function ResourceBar({
       </div>
     )
 
+  // Tooltip's wrapper is inline-flex: it sizes the row to its content (hence
+  // w-full on the row, or the track collapses to the labels' width) and it is
+  // inline-level, so the block div keeps sibling bars stacked instead of
+  // sharing one line.
   if (tooltip) {
     return (
-      <Tooltip content={tooltip} delay={200} position="top" wrapperClassName="w-full min-w-0">
-        {bar}
-      </Tooltip>
+      <div className="min-w-0">
+        <Tooltip content={tooltip} delay={200} position="top" wrapperClassName="w-full min-w-0">
+          {bar}
+        </Tooltip>
+      </div>
     )
   }
 
