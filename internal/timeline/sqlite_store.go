@@ -16,6 +16,7 @@ import (
 
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 
+	"github.com/skyhook-io/radar/pkg/resourceid"
 	pkgtimeline "github.com/skyhook-io/radar/pkg/timeline"
 )
 
@@ -270,6 +271,24 @@ func (s *SQLiteStore) initSchema() error {
 	if _, err := s.db.Exec("CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq)"); err != nil {
 		return err
 	}
+	// Scoped history walks ownership by UID and selects rows by subject UID.
+	if _, err := s.db.Exec("CREATE INDEX IF NOT EXISTS idx_events_uid ON events(uid)"); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec("CREATE INDEX IF NOT EXISTS idx_events_owner_uid ON events(owner_uid)"); err != nil {
+		return err
+	}
+	// Without table statistics the planner reaches for idx_events_cluster_ts,
+	// which narrows nothing when every row shares one cluster, and scans the
+	// table instead of using the UID indexes. The mask analyzes every table
+	// whose statistics are missing or stale. It is deliberately unbounded
+	// (no 0x10): sampled statistics leave the planner on the scan. The first
+	// open of a large database pays seconds once; the statistics persist in
+	// the file, so later opens are near free. Run here rather than in the
+	// background: the store has one connection.
+	if _, err := s.db.Exec(sqliteOptimize); err != nil {
+		log.Printf("[timeline] Failed to gather query planner statistics for %s: %v", s.path, err)
+	}
 
 	return nil
 }
@@ -471,6 +490,174 @@ func (s *SQLiteStore) AppendBatch(ctx context.Context, events []TimelineEvent) e
 	return tx.Commit()
 }
 
+func sqliteScopeClause(scope ResourceScope) (string, []any) {
+	var parts []string
+	var args []any
+	in := func(column string, values []string) {
+		values = nonEmpty(values)
+		if len(values) == 0 {
+			return
+		}
+		parts = append(parts, column+" IN ("+strings.TrimSuffix(strings.Repeat("?,", len(values)), ",")+")")
+		for _, v := range values {
+			args = append(args, v)
+		}
+	}
+	in("uid", scope.UIDs)
+	in("owner_uid", scope.OwnerUIDs)
+	refs := func(list []resourceid.Ref, extra string) {
+		// One branch per kind, not per resource: SQLite caps expression
+		// depth, and a scope can name thousands of resources.
+		for _, g := range groupRefs(list) {
+			parts = append(parts, "(kind = ? AND namespace = ? AND name IN ("+strings.TrimSuffix(strings.Repeat("?,", len(g.names)), ",")+
+				") AND (COALESCE(api_version, '') = '' OR "+sqliteAPIGroupExpr+" = ?)"+extra+")")
+			args = append(args, g.kind, g.namespace)
+			for _, name := range g.names {
+				args = append(args, name)
+			}
+			args = append(args, g.group)
+		}
+	}
+	refs(scope.Refs, "")
+	refs(scope.OwnerlessRefs, ownerUnknownSQL)
+	if len(parts) == 0 {
+		return " AND 0", nil
+	}
+	return " AND (" + strings.Join(parts, " OR ") + ")", args
+}
+
+// nonEmpty drops empty UIDs: compared against a column, one would match every
+// row that recorded no UID at all.
+func nonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// sqliteOptimize gathers planner statistics for tables whose statistics are
+// missing or stale, without SQLite's analysis bound (SQLite's default
+// optimize mask bounds it, which would replace full statistics with sampled
+// ones).
+const sqliteOptimize = "PRAGMA optimize=0x10002"
+
+// ownerUnknownSQL is pkgtimeline.OwnerUnknown as a SQL condition, shared by
+// the SQLite and Postgres stores.
+const ownerUnknownSQL = " AND COALESCE(owner_uid, '') = '' AND COALESCE(owner_evidence, '') NOT IN ('observed', 'enriched', 'reconstructed')"
+
+const sqliteAPIGroupExpr = "CASE WHEN instr(api_version, '/') > 0 THEN substr(api_version, 1, instr(api_version, '/') - 1) ELSE '' END"
+
+type refGroup struct {
+	group, kind, namespace string
+	names                  []string
+}
+
+// groupRefs gathers refs that share a group, kind and namespace, in first-seen order.
+func groupRefs(refs []resourceid.Ref) []*refGroup {
+	var out []*refGroup
+	index := map[[3]string]*refGroup{}
+	for _, ref := range refs {
+		k := [3]string{ref.Group, ref.Kind, ref.Namespace}
+		g := index[k]
+		if g == nil {
+			g = &refGroup{group: ref.Group, kind: ref.Kind, namespace: ref.Namespace}
+			index[k] = g
+			out = append(out, g)
+		}
+		g.names = append(g.names, ref.Name)
+	}
+	return out
+}
+
+// Identities returns the distinct resources the rows matching q were about.
+func (s *SQLiteStore) Identities(ctx context.Context, q IdentityQuery, limit int) ([]Identity, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	query := "SELECT DISTINCT COALESCE(api_version, ''), kind, name, COALESCE(uid, ''), COALESCE(owner_uid, '') FROM events WHERE 1=1"
+	var args []any
+	if q.ClusterContext != "" {
+		query += " AND cluster_context = ?"
+		args = append(args, q.ClusterContext)
+	}
+	if q.Namespace != "" {
+		query += " AND namespace = ?"
+		args = append(args, q.Namespace)
+	}
+	if q.Ref != nil {
+		query += " AND kind = ? AND namespace = ? AND name = ? AND (COALESCE(api_version, '') = '' OR " + sqliteAPIGroupExpr + " = ?)"
+		args = append(args, q.Ref.Kind, q.Ref.Namespace, q.Ref.Name, q.Ref.Group)
+	}
+	if len(q.Kinds) > 0 {
+		query += " AND kind IN (" + strings.TrimSuffix(strings.Repeat("?,", len(q.Kinds)), ",") + ")"
+		for _, k := range q.Kinds {
+			args = append(args, k)
+		}
+	}
+	if q.NamePrefix != "" {
+		// substr compares exactly; LIKE would fold ASCII case and need escaping.
+		query += " AND substr(name, 1, ?) = ?"
+		args = append(args, len(q.NamePrefix), q.NamePrefix)
+	}
+	if q.OwnerUnknown {
+		query += ownerUnknownSQL
+	}
+	query += " LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query identities: %w", err)
+	}
+	defer rows.Close()
+	var out []Identity
+	for rows.Next() {
+		var id Identity
+		if err := rows.Scan(&id.APIVersion, &id.Kind, &id.Name, &id.UID, &id.OwnerUID); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// OwnedUIDs returns the distinct UIDs of resources whose rows name one of
+// ownerUIDs as their owner.
+func (s *SQLiteStore) OwnedUIDs(ctx context.Context, clusterContext string, ownerUIDs []string, limit int) ([]string, error) {
+	ownerUIDs = nonEmpty(ownerUIDs)
+	if len(ownerUIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	query := "SELECT DISTINCT uid FROM events WHERE COALESCE(uid, '') <> '' AND owner_uid IN (" +
+		strings.TrimSuffix(strings.Repeat("?,", len(ownerUIDs)), ",") + ")"
+	args := make([]any, 0, len(ownerUIDs)+2)
+	for _, uid := range ownerUIDs {
+		args = append(args, uid)
+	}
+	if clusterContext != "" {
+		query += " AND cluster_context = ?"
+		args = append(args, clusterContext)
+	}
+	query += " LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query owned uids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		out = append(out, uid)
+	}
+	return out, rows.Err()
+}
+
 // Query retrieves events matching the given options
 func (s *SQLiteStore) Query(ctx context.Context, opts QueryOptions) ([]TimelineEvent, error) {
 	// Build query
@@ -580,6 +767,12 @@ func (s *SQLiteStore) Query(ctx context.Context, opts QueryOptions) ([]TimelineE
 	if opts.ClusterContext != "" {
 		query.WriteString(" AND cluster_context = ?")
 		args = append(args, opts.ClusterContext)
+	}
+
+	if !opts.Scope.IsZero() {
+		clause, scopeArgs := sqliteScopeClause(opts.Scope)
+		query.WriteString(clause)
+		args = append(args, scopeArgs...)
 	}
 
 	seqPaging := opts.SeqPaging || opts.SinceSeq > 0
@@ -957,9 +1150,18 @@ func (s *SQLiteStore) runCleanup(retention time.Duration, maxStorageBytes int64)
 	var checkpointErr error
 	var pruneErr error
 	ctx := context.Background()
+	// Keeps planner statistics current as the table turns over; re-analyzes
+	// only tables that changed enough to need it. Before the checkpoint, so
+	// the statistics it writes don't land back in a just-truncated WAL.
+	refreshStats := func() {
+		if _, err := s.db.ExecContext(ctx, sqliteOptimize); err != nil {
+			log.Printf("[timeline] Failed to refresh query planner statistics for %s: %v", s.path, err)
+		}
+	}
 	if retention > 0 {
 		n, cleanupErr = s.Cleanup(ctx, retention)
 		if cleanupErr == nil {
+			refreshStats()
 			checkpointErr = s.checkpointWAL(ctx)
 		}
 	}
@@ -967,6 +1169,9 @@ func (s *SQLiteStore) runCleanup(retention time.Duration, maxStorageBytes int64)
 		var pruned int64
 		pruned, pruneErr = s.PruneToMaxSize(ctx, maxStorageBytes)
 		n += pruned
+	}
+	if retention <= 0 {
+		refreshStats()
 	}
 	err := errors.Join(cleanupErr, checkpointErr, pruneErr)
 	now := time.Now()

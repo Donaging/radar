@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -20,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/skyhook-io/radar/pkg/resourceid"
 	pkgtimeline "github.com/skyhook-io/radar/pkg/timeline"
 )
 
@@ -33,7 +35,21 @@ const (
 
 	postgresAppendLockNamespace int64 = 0x52414452
 	postgresAppendLockID        int64 = 2
+
+	postgresIndexBuildLockID  int32 = 3
+	postgresIndexBuildTimeout       = time.Hour
 )
+
+// postgresBackgroundIndexes are built after startup rather than by a
+// migration. A migration runs in one transaction under the startup deadline
+// and blocks writes while it builds: on a large retained table that stalls
+// startup, and during a rolling upgrade it stalls the older replicas'
+// appends. The queries these serve (scoped history by subject and owner UID)
+// work without them, only slower.
+var postgresBackgroundIndexes = []struct{ name, column string }{
+	{"radar_timeline_events_uid_idx", "uid"},
+	{"radar_timeline_events_owner_uid_idx", "owner_uid"},
+}
 
 var postgresPingTimeout = 10 * time.Second
 
@@ -162,13 +178,77 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 		return closeOnError("hydrate PostgreSQL timeline seen resources", err)
 	}
 
-	store.wg.Add(1)
+	store.wg.Add(2)
 	go func() {
 		defer store.wg.Done()
 		store.runSeenWriter()
 	}()
+	go func() {
+		defer store.wg.Done()
+		store.buildBackgroundIndexes()
+	}()
 
 	return store, nil
+}
+
+// buildBackgroundIndexes creates postgresBackgroundIndexes without blocking
+// writes. One replica builds at a time; the rest skip. An index an
+// interrupted build left invalid is dropped and rebuilt.
+func (s *PostgresStore) buildBackgroundIndexes() {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresIndexBuildTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.quit:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		log.Printf("[timeline] Failed to build indexes: acquire connection: %v", err)
+		return
+	}
+	defer conn.Close()
+	var locked bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1, $2)",
+		postgresMigrationLockNamespace, postgresIndexBuildLockID).Scan(&locked); err != nil {
+		log.Printf("[timeline] Failed to build indexes: take build lock: %v", err)
+		return
+	}
+	if !locked {
+		return
+	}
+	defer func() {
+		unlockCtx, cancelUnlock := context.WithTimeout(context.Background(), postgresUnlockTimeout)
+		defer cancelUnlock()
+		_, _ = conn.ExecContext(unlockCtx, "SELECT pg_advisory_unlock($1, $2)",
+			postgresMigrationLockNamespace, postgresIndexBuildLockID)
+	}()
+
+	for _, index := range postgresBackgroundIndexes {
+		var valid bool
+		err := conn.QueryRowContext(ctx,
+			"SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass($1)", index.name).Scan(&valid)
+		switch {
+		case err == nil && valid:
+			continue
+		case err == nil:
+			if _, err := conn.ExecContext(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+index.name); err != nil {
+				log.Printf("[timeline] Failed to drop invalid index %s: %v", index.name, err)
+				return
+			}
+		case !errors.Is(err, sql.ErrNoRows):
+			log.Printf("[timeline] Failed to check index %s: %v", index.name, err)
+			return
+		}
+		if _, err := conn.ExecContext(ctx, "CREATE INDEX CONCURRENTLY IF NOT EXISTS "+index.name+
+			" ON radar_timeline_events ("+index.column+")"); err != nil {
+			log.Printf("[timeline] Failed to build index %s: %v", index.name, err)
+			return
+		}
+	}
 }
 
 func validatePostgresSchema(ctx context.Context, db *sql.DB) error {
@@ -742,6 +822,91 @@ func (s *PostgresStore) storageBytes(ctx context.Context) int64 {
 	return total.Int64
 }
 
+// OwnedUIDs returns the distinct UIDs of resources whose rows name one of
+// ownerUIDs as their owner.
+func (s *PostgresStore) OwnedUIDs(ctx context.Context, clusterContext string, ownerUIDs []string, limit int) ([]string, error) {
+	ownerUIDs = nonEmpty(ownerUIDs)
+	if len(ownerUIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	ctx, cancel := withPostgresOperationTimeout(ctx)
+	defer cancel()
+	query := `SELECT DISTINCT uid FROM radar_timeline_events
+		WHERE COALESCE(uid, '') <> '' AND owner_uid = ANY($1::text[])`
+	args := []any{ownerUIDs}
+	if clusterContext != "" {
+		query += " AND cluster_context = $2"
+		args = append(args, clusterContext)
+	}
+	query += fmt.Sprintf(" LIMIT $%d", len(args)+1)
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query owned uids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		out = append(out, uid)
+	}
+	return out, rows.Err()
+}
+
+const postgresAPIGroupExpr = "CASE WHEN strpos(api_version, '/') > 0 THEN split_part(api_version, '/', 1) ELSE '' END"
+
+// Identities returns the distinct resources the rows matching q were about.
+func (s *PostgresStore) Identities(ctx context.Context, q IdentityQuery, limit int) ([]Identity, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	ctx, cancel := withPostgresOperationTimeout(ctx)
+	defer cancel()
+	query := "SELECT DISTINCT COALESCE(api_version, ''), kind, name, COALESCE(uid, ''), COALESCE(owner_uid, '') FROM radar_timeline_events WHERE true"
+	var args []any
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if q.ClusterContext != "" {
+		query += " AND cluster_context = " + arg(q.ClusterContext)
+	}
+	if q.Namespace != "" {
+		query += " AND namespace = " + arg(q.Namespace)
+	}
+	if q.Ref != nil {
+		query += " AND kind = " + arg(q.Ref.Kind) + " AND namespace = " + arg(q.Ref.Namespace) + " AND name = " + arg(q.Ref.Name) +
+			" AND (COALESCE(api_version, '') = '' OR " + postgresAPIGroupExpr + " = " + arg(q.Ref.Group) + ")"
+	}
+	if len(q.Kinds) > 0 {
+		query += " AND kind = ANY(" + arg(q.Kinds) + "::text[])"
+	}
+	if q.NamePrefix != "" {
+		query += " AND starts_with(name, " + arg(q.NamePrefix) + ")"
+	}
+	if q.OwnerUnknown {
+		query += ownerUnknownSQL
+	}
+	query += " LIMIT " + arg(limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query identities: %w", err)
+	}
+	defer rows.Close()
+	var out []Identity
+	for rows.Next() {
+		var id Identity
+		if err := rows.Scan(&id.APIVersion, &id.Kind, &id.Name, &id.UID, &id.OwnerUID); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) buildQuery(opts QueryOptions) (string, []any, error) {
 	query := strings.Builder{}
 	query.WriteString(`SELECT id, timestamp, source, kind, api_version, namespace, name, uid, event_type,
@@ -827,6 +992,34 @@ func (s *PostgresStore) buildQuery(opts QueryOptions) (string, []any, error) {
 	}
 	if opts.ClusterContext != "" {
 		addFilter(" AND cluster_context = $%d", opts.ClusterContext)
+	}
+	if !opts.Scope.IsZero() {
+		var parts []string
+		if uids := nonEmpty(opts.Scope.UIDs); len(uids) > 0 {
+			parts = append(parts, fmt.Sprintf("uid = ANY($%d::text[])", argN))
+			args = append(args, uids)
+			argN++
+		}
+		if owners := nonEmpty(opts.Scope.OwnerUIDs); len(owners) > 0 {
+			parts = append(parts, fmt.Sprintf("owner_uid = ANY($%d::text[])", argN))
+			args = append(args, owners)
+			argN++
+		}
+		refs := func(list []resourceid.Ref, extra string) {
+			for _, g := range groupRefs(list) {
+				parts = append(parts, fmt.Sprintf("(kind = $%d AND namespace = $%d AND name = ANY($%d::text[]) AND (COALESCE(api_version, '') = '' OR "+
+					postgresAPIGroupExpr+" = $%d)"+extra+")", argN, argN+1, argN+2, argN+3))
+				args = append(args, g.kind, g.namespace, g.names, g.group)
+				argN += 4
+			}
+		}
+		refs(opts.Scope.Refs, "")
+		refs(opts.Scope.OwnerlessRefs, ownerUnknownSQL)
+		if len(parts) == 0 {
+			query.WriteString(" AND false")
+		} else {
+			query.WriteString(" AND (" + strings.Join(parts, " OR ") + ")")
+		}
 	}
 
 	seqPaging := opts.SeqPaging || opts.SinceSeq > 0

@@ -36,6 +36,7 @@ import {
 import type { ServicePortRenderProps } from '@skyhook-io/k8s-ui/components/resources/renderers/ServiceRenderer'
 import { isJobSetV1Alpha2 } from '@skyhook-io/k8s-ui/components/resources/resource-utils-jobset-lws'
 import type { SelectedResource, ResourceRef, Relationships, ResourceWithRelationships } from '../../types'
+import { useHistoryPaging } from './historyPaging'
 import {
   kindToPlural,
   kindToPluralWithGroup,
@@ -46,7 +47,8 @@ import {
   type NavigateToResource,
 } from '../../utils/navigation'
 import {
-  useChanges,
+  useWorkloadHistory,
+  fetchWorkloadHistoryPage,
   useResourceWithRelationships,
   usePodLogs,
   useTopology,
@@ -791,15 +793,26 @@ export function WorkloadView({
     updatesError: resourceFocusedUpdatesError,
   } = useResourceEvents(apiKind, namespace, name, effectiveGroup)
 
-  // Fetch all events for this resource's namespace (only when expanded)
-  const { data: allEvents, isLoading: eventsLoading } = useChanges({
-    namespaces: [namespace],
-    timeRange: 'all',
-    includeK8sEvents: true,
-    includeManaged: true,
-    limit: 10000,
-    enabled: expanded,
-  })
+  // This workload's history (only when expanded): the workload, what it owns,
+  // K8s Events about those, and the resources attached to it. Older pages load
+  // on demand and stay until the viewed workload changes.
+  // The group settles from the route, or from the fetched resource when the
+  // route has none; asking before then would key the history (and resolve a
+  // colliding kind) under the wrong group and refetch once it settles.
+  const historyGroupSettled = Boolean(rest.group) || resource !== undefined || resourceError != null
+  const historyQuery = useWorkloadHistory(apiKind, namespace, name, effectiveGroup, expanded && historyGroupSettled)
+  const {
+    events: allEvents,
+    truncated: historyTruncated,
+    loadOlder: loadOlderHistory,
+    loadingOlder: loadingOlderHistory,
+    olderError: olderHistoryError,
+  } = useHistoryPaging(
+    `${effectiveGroup ?? ''}/${apiKind}/${namespace}/${name}`,
+    historyQuery.data,
+    (beforeSeq) => fetchWorkloadHistoryPage(apiKind, namespace, name, effectiveGroup, beforeSeq),
+  )
+  const eventsLoading = historyQuery.isLoading || (expanded && !historyGroupSettled)
 
   // RBAC
   const canUpdateSecrets = useCanUpdateSecrets()
@@ -1196,6 +1209,14 @@ export function WorkloadView({
         refetch={refetchResourceAndRuns}
         // Timeline
         allEvents={allEvents}
+        historyTruncated={historyTruncated}
+        onLoadOlderHistory={loadOlderHistory}
+        loadingOlderHistory={loadingOlderHistory}
+        olderHistoryError={olderHistoryError}
+        historyScoped
+        historyIncomplete={Boolean(historyQuery.data?.incomplete)}
+        historyError={historyQuery.error as Error | null}
+        onRetryHistory={() => void historyQuery.refetch()}
         relatedTimelineEvents={relatedTimelineEvents}
         eventsLoading={eventsLoading || (batchExecution && batchKind !== 'JobSet' && batchRunsQuery.isLoading)}
         topology={topology}

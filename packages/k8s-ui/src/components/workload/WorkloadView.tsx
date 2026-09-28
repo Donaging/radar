@@ -56,7 +56,7 @@ import { ResourceRendererDispatch, getResourceStatus, diagnoseHealthHint, type D
 import type { ScalerDiagnosis } from '../resources/renderers/WorkloadRenderer'
 import { DetailShell, type DetailShellTab } from '../shared/DetailShell'
 import { HelmManagedByChip, ManagedByChip, type HelmOwnerRef } from '../shared/ManagedByChip'
-import { getKindColorOutline, displayKindName, OperationalIssuesShownContext, ResourceRefBadge } from '../ui/drawer-components'
+import { AlertBanner, getKindColorOutline, displayKindName, OperationalIssuesShownContext, ResourceRefBadge } from '../ui/drawer-components'
 import { Badge, type BadgeSeverity } from '../ui/Badge'
 import { Tooltip } from '../ui/Tooltip'
 import { midTruncate } from '../../utils/format'
@@ -181,8 +181,23 @@ interface WorkloadViewProps {
   refetch?: () => void
 
   // ── Timeline data ────────────────────────────────────────────────────────
-  /** All timeline events for this resource's namespace */
+  /** Timeline events the history lanes are built from: this workload's own
+   *  history, or events for its namespace from a host that has no scoped query. */
   allEvents?: TimelineEvent[]
+  /** Older history exists beyond allEvents. */
+  historyTruncated?: boolean
+  /** Loads the next older page of history; omit when the host can't page. */
+  onLoadOlderHistory?: () => void
+  loadingOlderHistory?: boolean
+  /** The last Load older attempt failed. */
+  olderHistoryError?: Error | null
+  /** allEvents holds only this workload's own history (what it runs and the
+   *  resources attached to it), not its whole namespace. */
+  historyScoped?: boolean
+  /** Some related resources' history isn't included: there were more than the host follows. */
+  historyIncomplete?: boolean
+  historyError?: Error | null
+  onRetryHistory?: () => void
   /** Persisted lifecycle events reconstructed for resources related to this workload. */
   relatedTimelineEvents?: TimelineEvent[]
   /** Whether timeline events are loading */
@@ -384,6 +399,14 @@ export function WorkloadView({
   refetch: refetchProp,
   // Timeline
   allEvents,
+  historyTruncated = false,
+  onLoadOlderHistory,
+  loadingOlderHistory = false,
+  olderHistoryError = null,
+  historyScoped = false,
+  historyIncomplete = false,
+  historyError = null,
+  onRetryHistory,
   relatedTimelineEvents = [],
   eventsLoading = false,
   topology,
@@ -501,9 +524,10 @@ export function WorkloadView({
       events: allEvents,
       topology,
       rootResource: { kind, group, namespace, name },
+      eventsScopedToRoot: historyScoped,
       groupByApp: true,
     })
-  }, [allEvents, topology, kind, group, namespace, name])
+  }, [allEvents, topology, kind, group, namespace, name, historyScoped])
 
   // Topology tab — the seeded neighborhood around this one workload (its
   // ownership core + attached Services/config/policies), not the whole namespace.
@@ -1145,6 +1169,14 @@ export function WorkloadView({
           <EventsTab
             events={resourceEvents}
             isLoading={eventsLoading}
+            truncated={historyTruncated}
+            onLoadOlder={onLoadOlderHistory}
+            loadingOlder={loadingOlderHistory}
+            olderError={olderHistoryError}
+            scoped={historyScoped}
+            incomplete={historyIncomplete}
+            error={historyError}
+            onRetry={onRetryHistory}
             selectedEventId={selectedEventId}
             onSelectEvent={setSelectedEventId}
             topology={topology}
@@ -1399,6 +1431,14 @@ function OwnershipHeading({
 function EventsTab({
   events,
   isLoading,
+  truncated,
+  onLoadOlder,
+  loadingOlder,
+  olderError,
+  scoped,
+  incomplete,
+  error,
+  onRetry,
   selectedEventId,
   onSelectEvent,
   topology,
@@ -1406,6 +1446,14 @@ function EventsTab({
 }: {
   events: TimelineEvent[]
   isLoading: boolean
+  truncated?: boolean
+  onLoadOlder?: () => void
+  loadingOlder?: boolean
+  olderError?: Error | null
+  scoped?: boolean
+  incomplete?: boolean
+  error?: Error | null
+  onRetry?: () => void
   selectedEventId: string | null
   onSelectEvent: (id: string | null) => void
   topology?: Topology
@@ -1500,8 +1548,66 @@ function EventsTab({
     )
   }
 
+  if (error && events.length === 0) {
+    return (
+      <div className="p-4">
+        <AlertBanner variant="error" title="Couldn't load this workload's history" message={error.message}>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="mt-2 rounded border border-theme-border bg-theme-surface px-2 py-1 text-xs text-theme-text-primary transition-colors hover:bg-theme-hover"
+            >
+              Try again
+            </button>
+          )}
+        </AlertBanner>
+      </div>
+    )
+  }
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
+      {error && (
+        <div className="shrink-0 flex flex-wrap items-center gap-x-2 border-b border-theme-border bg-theme-base px-4 py-1.5 text-xs" role="alert">
+          <span className="text-[var(--color-error)]" title={error.message}>
+            Couldn't load this workload's history. Showing only what loaded.
+          </span>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="underline decoration-theme-border underline-offset-2 text-theme-text-secondary hover:text-theme-text-primary"
+            >
+              Try again
+            </button>
+          )}
+        </div>
+      )}
+      {(scoped || truncated || incomplete) && (
+        <div className="shrink-0 flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-theme-border bg-theme-base px-4 py-1.5 text-xs text-theme-text-secondary" role="note">
+          {scoped && (
+            <span className="text-theme-text-tertiary">
+              This workload, what it runs, and the Services, Ingresses, config and scalers attached to it.
+            </span>
+          )}
+          {incomplete && <span>This workload has more past runs and related resources than Radar follows, so some are left out.</span>}
+          {truncated && <span>Showing the most recent events. Older history exists.</span>}
+          {truncated && olderError && (
+            <span className="text-[var(--color-error)]" title={olderError.message}>Couldn't load older events.</span>
+          )}
+          {truncated && onLoadOlder && (
+            <button
+              type="button"
+              onClick={onLoadOlder}
+              disabled={loadingOlder}
+              className="underline decoration-theme-border underline-offset-2 hover:text-theme-text-primary disabled:opacity-60"
+            >
+              {loadingOlder ? 'Loading…' : olderError ? 'Try again' : 'Load older'}
+            </button>
+          )}
+        </div>
+      )}
       {/* Swimlane — the shared TimelineSwimlanes widget (kind chips, top axis with
           ticks + Now line, event clustering), flat + compact for a single subject.
           Its drawer is suppressed (compact); the list below is the detail surface. */}
