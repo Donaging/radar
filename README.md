@@ -67,8 +67,10 @@ curl -fsSL https://get.radarhq.io | sh
 
 **Homebrew:**
 ```bash
-brew install skyhook-io/tap/radar
+brew install kubectl-radar
 ```
+
+Also available from our tap: `brew install skyhook-io/tap/radar`.
 
 Then run: `kubectl radar`. Quick install, PowerShell, Homebrew, and Scoop also set up the `radar` shorthand. Krew and direct downloads use `kubectl radar` unless you add your own `radar` symlink.
 
