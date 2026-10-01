@@ -74,3 +74,12 @@ export {
 export type { CardSectionTone } from "./CardSection";
 export { MultiSelectPicker } from "./MultiSelectPicker";
 export type { MultiSelectPickerProps } from "./MultiSelectPicker";
+export {
+  RadarUpgradeNote,
+  RadarUpgradeAction,
+  RadarUpgradeContext,
+  formatRadarVersion,
+  radarUpgradeDetail,
+  radarUpgradeHeadline,
+} from "./RadarUpgradeNote";
+export type { RadarUpgradeActions } from "./RadarUpgradeNote";
