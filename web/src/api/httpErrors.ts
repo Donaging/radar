@@ -56,10 +56,8 @@ const MAX_PLAIN_TEXT_REASON = 200
 
 /**
  * Reads a failed response once. A JSON object body is returned as-is; anything
- * else becomes `{ error: "HTTP <status> (<text>)" }` so callers never surface a
- * contentless "Unknown error". A short plain-text reason, such as Radar Hub's
- * `cluster "x" not connected`, is appended; HTML pages and chi's
- * unknown-route body add nothing and are left out.
+ * else becomes `{ error: <message> }` (see nonJsonErrorMessage) so callers
+ * never surface a contentless "Unknown error".
  */
 export async function readErrorResponse(response: Response): Promise<ErrorResponse> {
   const text = await response.text().catch(() => '')
@@ -74,15 +72,28 @@ export async function readErrorResponse(response: Response): Promise<ErrorRespon
   if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
     return { body: parsed as ErrorBody, unknownRoute }
   }
+  return { body: { error: nonJsonErrorMessage(response, text) }, unknownRoute }
+}
+
+/**
+ * The message for a failed response whose body is not a JSON object, for
+ * callers that already read the body as text. A short plain-text reason, such
+ * as Radar Hub's `cluster "x" not connected`, leads and the status trails it
+ * ("cluster "x" not connected (HTTP 503)"), so it reads like Radar's own
+ * errors. Without one (an HTML page, chi's unknown-route body, an empty body)
+ * the status is the message: "HTTP 502 (Bad Gateway)".
+ */
+export function nonJsonErrorMessage(response: Response, text: string): string {
   const status = httpStatusMessage(response.status, response.statusText)
+  const contentType = response.headers.get('content-type')
   const reason = text.trim()
   const showReason =
-    !unknownRoute &&
+    !isUnknownRouteResponse(response.status, contentType, text) &&
     (contentType ?? '').toLowerCase().startsWith('text/plain') &&
     reason.length > 0 &&
     reason.length <= MAX_PLAIN_TEXT_REASON &&
     !status.toLowerCase().includes(reason.toLowerCase())
-  return { body: { error: showReason ? `${status}: ${reason}` : status }, unknownRoute }
+  return showReason ? `${reason} (HTTP ${response.status})` : status
 }
 
 export async function readErrorBody(response: Response): Promise<ErrorBody> {
