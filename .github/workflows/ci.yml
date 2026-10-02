@@ -82,7 +82,7 @@ jobs:
           # it, losing the service or the env block above would leave the whole
           # PostgreSQL backend untested while this job still reported green.
           RADAR_REQUIRE_POSTGRES_TESTS: "1"
-        run: go test ./internal/timeline
+        run: go test ./internal/timeline ./internal/k8s
 
       - name: Build
         run: go build -o explorer ./cmd/explorer
