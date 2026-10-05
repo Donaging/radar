@@ -161,26 +161,47 @@ Radar binary (including Radar Cloud self-upgrade) does not update RBAC. Missing 
 on an older `--reuse-values` installation default to enabled; set explicit false
 before upgrading if the added visibility is unwanted.
 
-### Radar Cloud background identities (`radar:system`)
+### Radar Cloud background services (`radar:system`)
 
-The hub's alerts worker and timeline puller call Radar
-as the `radar:system` group, not as a user. `cloud.systemRbac` (default `true`)
-binds that group to a read-only set: `view`, the cluster-read and
-integration-read add-ons above, and `get/list/watch` on Secrets. Secret read is
-what Helm release alerts and Secret changes in the hub timeline need, because
-Helm stores each release as a Secret.
+Radar Cloud's alerts worker and timeline puller read as `radar:system`.
+`cloud.systemRbac` (default `true`) creates the chart's default read grant:
+a chart-owned role aggregated to match `view`, the cluster-read and
+integration-read add-ons, and cluster-wide `get/list/watch` on Secrets.
+Helm release alerts and Secret changes in the timeline need Secret read;
+Helm stores releases as Secrets. The grant includes no writes.
 
-It is independent of `cloud.defaultRbac`, so turning the role bindings off
-(`cloud.defaultRbac.create=false`, for example when IdP groups decide cluster
-access) leaves alerts and the hub timeline working. It is all or nothing:
-`cloud.systemRbac=false` removes the whole grant, and alerts and the hub
-timeline then see nothing on clusters without the role bindings unless
-you bind `radar:system` yourself. Change it through this value: a binding
-edited or deleted with `kubectl` comes back on the next upgrade.
+### Radar Cloud automatic Diagnose (`radar:ai`)
 
-An upgrade with `--reuse-values` from a release that predates the key leaves it
-off, so an existing install never gains Secret read without choosing it. Set
-`cloud.systemRbac=true` on those installs.
+Manual Diagnose turns read as the person who started them. Radar Cloud forwards
+that person's identity and groups; `radar:ai` is not involved. MCP clients also
+read with the user's own permissions.
+
+Automatic (alert-triggered) Diagnose runs read as `radar:ai` only, a permanent
+read-only background diagnostic reader. Never grant this group write
+permissions; a future write-capable feature needs its own group.
+`cloud.aiRbac` (default `true`) creates the chart's default grant: a chart-owned
+role aggregated to match `view` plus the cluster-read and integration-read
+add-ons. With the standard `view` role this grant includes no Kubernetes Secret
+permission; it also inherits anything your cluster adds to `view` (ClusterRoles
+labelled `rbac.authorization.k8s.io/aggregate-to-view`). It does include pod
+logs and ConfigMaps, which may contain sensitive data.
+
+Both values are independent of `cloud.defaultRbac`. They control only the
+chart's default grants, not whether features run; Radar Cloud controls whether
+Diagnose runs. False or absent creates no default grant and does not remove
+customer-created bindings. To narrow the default grants, set the matching value
+to false and supply your own read-only bindings for that group. With no grant,
+the group has no cluster access; automatic Diagnose has no viewer fallback.
+
+A plain `--reuse-values` upgrade from a chart predating these keys leaves them
+absent and creates neither default grant. Set `cloud.aiRbac=true` and/or
+`cloud.systemRbac=true` explicitly to create them. Changes made directly to
+chart-managed bindings are restored on the next Helm upgrade.
+
+Creating or updating these aggregated roles requires cluster-admin-equivalent
+authority or `escalate` on ClusterRoles, in addition to normal chart installation
+permissions. Restricted installers can set `cloud.aiRbac=false` and
+`cloud.systemRbac=false` and supply their own read-only group bindings.
 
 ### Connecting to Argo CD (GitOps deep diff)
 

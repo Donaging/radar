@@ -49,7 +49,8 @@ from being truthy.
 {{- $rbacDefaults := .Values.cloud.defaultRbac }}
 {{- $anyTier := and $rbacDefaults.create (or (and $rbacDefaults.viewer (get $csrOn "viewer")) (and $rbacDefaults.member (get $csrOn "member")) (and $rbacDefaults.owner (get $csrOn "owner"))) }}
 {{- $systemOn := include "radar.cloudSystemRbac" . | eq "true" }}
-{{- if and .Values.cloud.enabled .Values.rbac.create (or $anyTier $systemOn) -}}
+{{- $aiOn := include "radar.cloudAiRbac" . | eq "true" }}
+{{- if and .Values.cloud.enabled .Values.rbac.create (or $anyTier $systemOn $aiOn) -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -189,6 +190,23 @@ roleRef:
 subjects:
   - kind: Group
     name: radar:system
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- if $aiOn }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-cloud-ai-cluster-read
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-cluster-read
+subjects:
+  - kind: Group
+    name: radar:ai
     apiGroup: rbac.authorization.k8s.io
 {{- end }}
 {{- end -}}

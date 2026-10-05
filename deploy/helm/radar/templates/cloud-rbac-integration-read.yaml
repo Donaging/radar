@@ -2,7 +2,8 @@
 {{- $integration := $rbac.integrationRead | default dict -}}
 {{- $cluster := $rbac.clusterScopedRead | default dict -}}
 {{- $systemOn := include "radar.cloudSystemRbac" . | eq "true" -}}
-{{- if and .Values.cloud.enabled .Values.rbac.create (or $rbac.create $systemOn) -}}
+{{- $aiOn := include "radar.cloudAiRbac" . | eq "true" -}}
+{{- if and .Values.cloud.enabled .Values.rbac.create (or $rbac.create $systemOn $aiOn) -}}
 {{- $root := . -}}
 {{- $baseline := .Files.Get "files/integration-read-baseline.yaml" | fromYaml -}}
 {{- range $scope := list "Namespaced" "Cluster" -}}
@@ -15,6 +16,9 @@
 {{- end -}}
 {{- if $systemOn -}}
 {{- $tiers = append $tiers "system" -}}
+{{- end -}}
+{{- if $aiOn -}}
+{{- $tiers = append $tiers "ai" -}}
 {{- end -}}
 {{- $rules := list -}}
 {{- range $entry := $baseline.entries -}}
@@ -49,7 +53,7 @@ subjects:
   - kind: Group
     name: radar:{{ $tier }}
     apiGroup: rbac.authorization.k8s.io
-{{- if ne $tier "system" }}
+{{- if not (has $tier (list "system" "ai")) }}
   - kind: Group
     name: cloud:{{ $tier }}
     apiGroup: rbac.authorization.k8s.io

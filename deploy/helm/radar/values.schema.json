@@ -325,6 +325,7 @@
           }
         },
         "systemRbac": { "type": "boolean" },
+        "aiRbac": { "type": "boolean" },
         "insecureSkipVerify": { "type": "boolean" }
       }
     },

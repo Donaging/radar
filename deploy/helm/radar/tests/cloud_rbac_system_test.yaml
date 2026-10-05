@@ -4,7 +4,37 @@ templates:
   - cloud-rbac-cluster-read.yaml
   - cloud-rbac-integration-read.yaml
 tests:
-  - it: keeps radar:system's view binding when the role bindings are off
+  - it: aggregates the owned read role exactly like view without feeding view
+    set:
+      cloud:
+        enabled: true
+        token: dummy
+        url: "wss://cloud.example"
+        clusterName: test-cluster
+    template: cloud-rbac-system.yaml
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-radar-cloud-system-read
+      - equal:
+          path: aggregationRule
+          value:
+            clusterRoleSelectors:
+              - matchLabels:
+                  rbac.authorization.k8s.io/aggregate-to-view: "true"
+      - notExists:
+          path: rules
+      - notExists:
+          path: metadata.labels["rbac.authorization.k8s.io/aggregate-to-view"]
+      - notExists:
+          path: metadata.labels["rbac.authorization.k8s.io/aggregate-to-edit"]
+      - notExists:
+          path: metadata.labels["rbac.authorization.k8s.io/aggregate-to-admin"]
+
+  - it: keeps radar:system's read binding when the tier bindings are off
     set:
       cloud:
         enabled: true
@@ -14,10 +44,16 @@ tests:
         defaultRbac:
           create: false
     template: cloud-rbac-system.yaml
-    documentSelector:
-      path: metadata.name
-      value: RELEASE-NAME-radar-cloud-system-view
+    documentIndex: 1
     asserts:
+      - hasDocuments:
+          count: 4
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-radar-cloud-system-read
+      - equal:
+          path: roleRef.name
+          value: RELEASE-NAME-radar-cloud-system-read
       - isKind:
           of: ClusterRoleBinding
 
@@ -30,6 +66,7 @@ tests:
         clusterName: test-cluster
         defaultRbac:
           create: false
+        aiRbac: false
     template: cloud-rbac-cluster-read.yaml
     asserts:
       - hasDocuments:
@@ -84,7 +121,7 @@ tests:
               name: radar:system
               apiGroup: rbac.authorization.k8s.io
 
-  - it: binds only radar:system
+  - it: binds only radar:system to the owned read role
     set:
       cloud:
         enabled: true
@@ -92,13 +129,19 @@ tests:
         url: "wss://cloud.example"
         clusterName: test-cluster
     template: cloud-rbac-system.yaml
-    documentSelector:
-      path: metadata.name
-      value: RELEASE-NAME-radar-cloud-system-view
+    documentIndex: 1
     asserts:
+      - isKind:
+          of: ClusterRoleBinding
       - equal:
-          path: roleRef.name
-          value: view
+          path: metadata.name
+          value: RELEASE-NAME-radar-cloud-system-read
+      - equal:
+          path: roleRef
+          value:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: RELEASE-NAME-radar-cloud-system-read
       - equal:
           path: subjects
           value:
@@ -122,7 +165,7 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: renders the view binding and Secret read by default
+  - it: renders the owned read role and binding plus Secret read by default
     set:
       cloud:
         enabled: true
@@ -132,7 +175,7 @@ tests:
     template: cloud-rbac-system.yaml
     asserts:
       - hasDocuments:
-          count: 3
+          count: 4
 
   - it: renders nothing when systemRbac is false
     set:

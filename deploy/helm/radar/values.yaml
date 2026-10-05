@@ -522,20 +522,25 @@ cloud:
     # while owner=false this renders nothing, but it stays latent — re-enabling
     # owner later activates it. See templates/cloud-rbac-node-ops.yaml.
     nodeOps: false
-  # Read-only binding for Radar Cloud's own background identities (the hub's
-  # alerts worker and timeline puller), which assert the
-  # radar:system group. Grants the viewer set (view + cluster-read +
-  # integration-read) and cluster-wide Secret read, which Helm release alerts
-  # and Secret changes in the hub timeline need (Helm stores each release as a
-  # Secret). No writes. See templates/cloud-rbac-system.yaml.
-  # Independent of defaultRbac: it stays on when the role bindings above are
-  # off, so alerts and the hub timeline keep working when IdP groups decide
-  # cluster access. All or nothing: false removes the whole grant, and then
-  # alerts and the hub timeline see nothing on clusters without
-  # the role bindings unless you bind radar:system yourself.
-  # An upgrade with --reuse-values from a release that predates this key leaves
-  # it OFF, so an existing install never gains Secret read without choosing it.
+  # Create the default read grant for radar:system: Radar Cloud's alerts worker
+  # and timeline puller. Includes view via a chart-owned aggregated role, the
+  # cluster-read and integration-read add-ons, and cluster-wide Secret read
+  # (Helm stores releases as Secrets). No writes. Independent of defaultRbac.
+  # False or absent (e.g. an older --reuse-values install) creates no default
+  # grant; customer bindings remain. This is not a feature switch.
   systemRbac: true
+  # Create the default read grant for radar:ai, used only by automatic
+  # (alert-triggered) Diagnose runs. Manual turns read as the person who started
+  # them; Radar Cloud forwards that person's identity and groups.
+  # Includes view via a chart-owned aggregated role and the cluster-read and
+  # integration-read add-ons. No Kubernetes Secret permission with the standard
+  # view role (it inherits anything added to view via aggregate-to-view); pod
+  # logs and ConfigMaps are readable and may contain sensitive data. Keep radar:ai
+  # permanently read-only; future write-capable features need their own group.
+  # Independent of defaultRbac. False or absent (e.g. an older --reuse-values
+  # install) creates no default grant; customer bindings remain. Radar Cloud
+  # controls whether Diagnose runs; this is not a feature switch.
+  aiRbac: true
 
 # Anonymous usage report to Skyhook, daily and when the pod stops: views,
 # actions and MCP tools used, plus this cluster's minor version, platform,

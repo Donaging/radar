@@ -73,7 +73,7 @@ Create the name of the service account to use
 {{- end -}}
 
 {{/*
-Whether the read-only binding for Radar Cloud's own background identities
+Whether the default read grant for Radar Cloud's background services
 (radar:system) renders. It includes cluster-wide Secret read, so an absent
 value means OFF: a `--reuse-values` upgrade from a release that predates the
 key renders with the previous release's tree and never gains Secret read
@@ -82,6 +82,20 @@ without someone choosing it. Fresh installs, plain upgrades, GitOps and
 */}}
 {{- define "radar.cloudSystemRbac" -}}
 {{- if and .Values.cloud.enabled (eq (toString .Values.cloud.systemRbac) "true") -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the default read grant for automatic Diagnose (radar:ai) renders.
+An absent value means OFF, as with radar.cloudSystemRbac: a
+`--reuse-values` upgrade from a release that predates the key never gains a
+new reader without someone choosing it.
+*/}}
+{{- define "radar.cloudAiRbac" -}}
+{{- if and .Values.cloud.enabled (eq (toString .Values.cloud.aiRbac) "true") -}}
 true
 {{- else -}}
 false

@@ -1,32 +1,41 @@
 {{- /*
-Read-only access for Radar Cloud's own background identities.
+Read-only access for Radar Cloud's alerts worker and timeline puller.
 
-The hub's background identities have no user or IdP groups; they assert the
-radar:system group. That is the alerts worker and the timeline puller (AI
-diagnose reads as radar:viewer). Without a binding of their own they would ride
-on radar:owner, which disappears when an org turns the role bindings off
-(cloud.defaultRbac.create=false) to let IdP groups decide cluster access —
-silently stopping alerts and the hub timeline.
+These background services read as radar:system. The default grant is view
+plus the cluster-read and integration-read add-ons and cluster-wide Secret
+read. Helm release alerts and Secret changes in the timeline need Secret read;
+Helm stores releases as Secrets. No writes.
 
-The grant is the viewer set (view here, plus the cluster-read and
-integration-read add-ons, which bind radar:system in their own templates) and
-Secret read. Secret read is what Helm release alerts and Secret changes in the
-hub timeline need: Radar lists Helm releases as the caller, and Helm stores
-each release as a Secret. Kubernetes RBAC cannot narrow that to Helm's
-Secrets, so it is all Secrets, read-only. No writes. All or nothing:
-cloud.systemRbac=false removes the whole grant.
+cloud.systemRbac controls only this chart's default grant, independently of
+cloud.defaultRbac. False or absent creates none and leaves customer bindings
+untouched. It is not a feature switch.
+
+A chart-owned role lets its rules change later without replacing the binding,
+whose roleRef is immutable. Aggregation keeps it equal to view with no curation.
 */}}
 {{- if and (include "radar.cloudSystemRbac" . | eq "true") .Values.rbac.create -}}
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "radar.fullname" . }}-cloud-system-read
+  labels:
+    {{- include "radar.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.authorization.k8s.io/aggregate-to-view: "true"
+# Omit rules because the aggregation controller owns them.
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "radar.fullname" . }}-cloud-system-view
+  name: {{ include "radar.fullname" . }}-cloud-system-read
   labels:
     {{- include "radar.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: view
+  name: {{ include "radar.fullname" . }}-cloud-system-read
 subjects:
   - kind: Group
     name: radar:system
