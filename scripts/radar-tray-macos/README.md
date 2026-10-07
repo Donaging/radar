@@ -71,8 +71,9 @@ bash ~/.radar/radar-update.sh       # check + auto-update (prints result)
 - **Gatekeeper/quarantine**: downloaded binaries carry `com.apple.quarantine`; the update script
   strips it (`xattr -d`), otherwise macOS may block execution.
 - **Two architectures**: `uname -m` selects `arm64` vs `amd64` asset.
-- **Default port assumed**: the helper uses `9280` (web UI + MCP). If the server runs on a custom
-  port, adjust `BASE` and the `radar_up()`/readiness probes in the scripts.
+- **Port auto-detected**: the server port is read from `~/.radar/mcp-port` (Radar's actual API/MCP
+  port), falling back to the default `9280` when the file is missing. Tray probes and the updater's
+  readiness check both use it, so a custom port is handled automatically.
 - This scaffold uses colored dot **PNGs generated at runtime** via AppKit (the macOS menu bar
   renders template icons; verify they display if you prefer monochrome).
 
