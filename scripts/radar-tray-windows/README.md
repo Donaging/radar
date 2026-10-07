@@ -145,6 +145,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\<you>\.radar\radar-
 - Remove the two `.vbs` files from the Startup folder.
 - To also stop Radar: `Stop-Process -Name radar`.
 
+### Port & configuration
+
+The helpers target Radar's HTTP API on its default port **`9280`** (web UI + MCP endpoint
+`http://localhost:9280/mcp`). On this version the port is assumed to be **`9280`**: if you run the
+server on a custom port, update `$script:base` in `radar-tray.ps1` and the port used by the
+updater's readiness probe in `radar-update.ps1`.
+
+> Note: the macOS companion (`scripts/radar-tray-macos/`) auto-detects the port from
+> `~/.radar/mcp-port` instead; the Windows helper keeps the documented `9280` default for now.
+
 ---
 
 ## Compatibility
