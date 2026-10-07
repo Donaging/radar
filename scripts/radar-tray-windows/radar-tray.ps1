@@ -19,10 +19,12 @@ if (-not $mutex.WaitOne(0, $false)) { exit 0 }
 $script:base     = 'http://localhost:9280'
 $script:URL      = $script:base
 $script:launcher = Join-Path $env:USERPROFILE '.radar\start-radar-silent.ps1'
-$script:state    = $null     # down | clusterdown | up
+$script:state    = $null                # down | clusterdown | up
 $script:lastTip  = ''
 $script:tc       = 0
 $script:forceRefresh = $true
+$script:updatePID    = $null            # PID dell'update in corso (asincrono, non blocca la UI)
+$script:updateResult = Join-Path $env:USERPROFILE '.radar\last-update-result.txt'
 
 # --- API helper ---
 function Test-Radar {
@@ -35,7 +37,6 @@ function Test-Radar {
     } catch { return $false }
 }
 
-# Cluster raggiungibile? GET /api/namespaces deve rispondere 200
 function Test-Cluster {
     try {
         $r = Invoke-WebRequest -Uri ($script:base + '/api/namespaces') -UseBasicParsing -TimeoutSec 6
@@ -53,7 +54,6 @@ function Friendly-Name([string]$arn) {
     return $arn
 }
 
-# Cluster corrente: dal contesto isCurrent=1 (fallback: settings.json ultimo usato)
 function Get-CurrentCluster {
     try {
         $ctxs = Get-Contexts
@@ -73,31 +73,56 @@ function Get-CurrentCluster {
     return $null
 }
 
-# Cambia cluster: POST /api/contexts/<name>, poi rinfresco immediato ed esito chiaro
+# Cambia cluster: POST /api/contexts/<name>, poi verifica ESITO REALE (rifiuti segnalati)
 function Switch-RadarContext([string]$ctxName) {
     $friendly = Friendly-Name $ctxName
+    $before = $null
+    try {
+        $b = (Get-Contexts | Where-Object { $_.isCurrent } | Select-Object -First 1)
+        if ($b) { $before = $b.name }
+    } catch { }
+    $postErr = $null
     try {
         $enc = [uri]::EscapeDataString($ctxName)
         # NB: su cluster irraggiungibile la POST puo' rispondere 500 ma il contesto CAMBIA comunque
-        try { $null = Invoke-RestMethod -Method Post -Uri ($script:base + '/api/contexts/' + $enc) -TimeoutSec 40 } catch { }
+        try { $null = Invoke-RestMethod -Method Post -Uri ($script:base + '/api/contexts/' + $enc) -TimeoutSec 40 }
+        catch { $postErr = $_.Exception.Message }
         Start-Sleep -Milliseconds 1200
         $ctxs = Get-Contexts
         Update-State $ctxs
         Populate-ClusterMenu $ctxs
-        $cur = $ctxs | Where-Object { $_.isCurrent } | Select-Object -First 1
+        $cur   = $ctxs | Where-Object { $_.isCurrent } | Select-Object -First 1
+        $now   = if ($cur) { $cur.name } else { $null }
         $target = if ($cur) { Friendly-Name $cur.name } else { $friendly }
-        $up = Test-Cluster
-        $esito = if ($up) { 'connesso' } else { 'NON raggiungibile' }
-        $icon  = if ($up) { [System.Windows.Forms.ToolTipIcon]::Info } else { [System.Windows.Forms.ToolTipIcon]::Warning }
-        $tray.ShowBalloonTip(4000, 'Radar', "Cluster: $target - $esito", $icon)
+        if ($now -ne $ctxName) {
+            # il contesto non ha assunto quello richiesto -> lo switch e' stato rifiutato/fallito
+            $detail = if ($postErr) { " ($postErr)" } else { '' }
+            $tray.ShowBalloonTip(6000, 'Radar', "Cambio cluster NON riuscito (ancora su $target).$detail", [System.Windows.Forms.ToolTipIcon]::Error)
+        } else {
+            $up = Test-Cluster
+            $esito = if ($up) { 'connesso' } else { 'NON raggiungibile' }
+            $icon  = if ($up) { [System.Windows.Forms.ToolTipIcon]::Info } else { [System.Windows.Forms.ToolTipIcon]::Warning }
+            $tray.ShowBalloonTip(4000, 'Radar', "Cluster: $target - $esito", $icon)
+        }
     } catch {
         $tray.ShowBalloonTip(5000, 'Radar', 'Errore cambio cluster: ' + $_.Exception.Message, [System.Windows.Forms.ToolTipIcon]::Error)
     }
     $script:forceRefresh = $true
 }
 
-# Calcola e applica stato (grigio/rosso/verde) in base a server + connettivita' cluster
+# Calcola e applica stato (grigio/rosso/verde), e gestisce il completamento dell'update asincrono
 function Update-State([object[]]$ctxs = @()) {
+    # reboot dell'update: quando il processo termina, mostra l'esito
+    if ($script:updatePID) {
+        if (-not (Get-Process -Id $script:updatePID -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Milliseconds 600
+            $msg = 'Nessun risultato disponibile.'
+            if (Test-Path $script:updateResult) { $msg = (Get-Content $script:updateResult -Raw).Trim() }
+            if ($msg.Length -gt 140) { $msg = $msg.Substring(0, 140) + '...' }
+            $tray.ShowBalloonTip(6000, 'Radar update', $msg, [System.Windows.Forms.ToolTipIcon]::Info)
+            $script:updatePID = $null
+        }
+    }
     if (-not (Test-Radar)) {
         if ($script:state -ne 'down') {
             Set-Status $script:iconOff 'Radar: SPENTO'
@@ -178,21 +203,24 @@ $tray.Add_DoubleClick({ Start-Process $script:URL })
 
 $start.Add_Click({
     if (-not (Test-Radar)) {
-        Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File', $script:launcher) -WindowStyle Hidden
+        # path quotato: gestisce %USERPROFILE% con spazi
+        Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',('"' + $script:launcher + '"')) -WindowStyle Hidden
         Start-Sleep -Milliseconds 400
         $script:forceRefresh = $true
     }
 })
 
 $check.Add_Click({
+    if ($script:updatePID) {
+        $tray.ShowBalloonTip(2500, 'Radar', 'Verifica/aggiornamento già in corso...', [System.Windows.Forms.ToolTipIcon]::Info)
+        return
+    }
     $tray.ShowBalloonTip(2000, 'Radar', 'Verifica aggiornamenti in corso...', [System.Windows.Forms.ToolTipIcon]::Info)
-    $resultFile = Join-Path $env:USERPROFILE '.radar\last-update-result.txt'
-    Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',(Join-Path $env:USERPROFILE '.radar\radar-update.ps1'),'-silent') -WindowStyle Hidden -Wait
-    Start-Sleep -Milliseconds 400
-    $msg = 'Nessun risultato disponibile.'
-    if (Test-Path $resultFile) { $msg = (Get-Content $resultFile -Raw).Trim() }
-    if ($msg.Length -gt 140) { $msg = $msg.Substring(0, 140) + '...' }
-    $tray.ShowBalloonTip(6000, 'Radar update', $msg, [System.Windows.Forms.ToolTipIcon]::Info)
+    try { Remove-Item $script:updateResult -Force -ErrorAction SilentlyContinue } catch { }
+    $updateScript = Join-Path $env:USERPROFILE '.radar\radar-update.ps1'
+    # asincrono (niente -Wait): non blocca la message-pump/UI della tray; l'esito arriva al termine
+    $p = Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',('"' + $updateScript + '"'),'-silent') -WindowStyle Hidden -PassThru
+    $script:updatePID = $p.Id
 })
 
 $quit.Add_Click({
@@ -202,7 +230,9 @@ $quit.Add_Click({
 })
 
 # Aggiorna icona+tooltip rigenerando l'icona (obbliga la shell a mostrare la nuova tooltip)
+# NotifyIcon.Text ha limite di lunghezza: tronca per non far fallire l'aggiornamento di stato
 function Set-Status($icon, $tip) {
+    if ($tip -and $tip.Length -gt 63) { $tip = $tip.Substring(0, 60) + '...' }
     $tray.Visible = $false
     $tray.Icon = $icon
     $tray.Text = $tip
@@ -223,6 +253,9 @@ $timer.Add_Tick({
 # Stato iniziale immediato + primo popolamento menu
 Update-State
 Populate-ClusterMenu (Get-Contexts)
+
+# AVVIA il timer di polling (senza questo il tray non si aggiorna piu' dopo lo startup)
+$timer.Start()
 
 [System.Windows.Forms.Application]::Run()
 
