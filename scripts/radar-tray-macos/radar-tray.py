@@ -19,8 +19,24 @@ import urllib.request
 
 import rumps
 
-BASE = "http://localhost:9280"
 RADAR_DIR = os.path.expanduser("~/.radar")
+
+
+def get_port():
+    """Radar's configured API/MCP port, read from ~/.radar/mcp-port (default 9280)."""
+    try:
+        p = os.path.join(RADAR_DIR, "mcp-port")
+        if os.path.exists(p):
+            v = open(p).read().strip()
+            if v.isdigit():
+                return int(v)
+    except Exception:
+        pass
+    return 9280
+
+
+PORT = get_port()
+BASE = "http://localhost:{port}".format(port=PORT)
 ICON_DIR = os.path.join(RADAR_DIR, "icons")
 START_SCRIPT = os.path.join(RADAR_DIR, "start-radar.sh")
 UPDATE_SCRIPT = os.path.join(RADAR_DIR, "radar-update.sh")
@@ -34,7 +50,7 @@ def radar_up():
     try:
         s = socket.socket()
         s.settimeout(1.5)
-        s.connect(("127.0.0.1", 9280))
+        s.connect(("127.0.0.1", PORT))
         s.close()
         return True
     except Exception:

@@ -46,8 +46,15 @@ clean_stale() {
 }
 clean_stale
 
-# Does OUR server answer on 9280? (TCP probe)
-radar_up() { nc -z 127.0.0.1 9280 2>/dev/null; }
+# Does OUR server answer? Port is read from ~/.radar/mcp-port (Radar's actual API/MCP port),
+# falling back to the documented default 9280 if the file is missing.
+PORT_FILE="$RADAR_DIR/mcp-port"
+if [ -f "$PORT_FILE" ] && grep -qE '^[0-9]+$' "$PORT_FILE"; then
+    RADAR_PORT="$(cat "$PORT_FILE")"
+else
+    RADAR_PORT=9280
+fi
+radar_up() { nc -z 127.0.0.1 "$RADAR_PORT" 2>/dev/null; }
 
 # Installed version (the reference to decide whether an update is needed)
 inst="$("$RADAR_BIN" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
