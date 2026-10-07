@@ -98,8 +98,9 @@ xattr -d com.apple.quarantine "$NEW" 2>/dev/null || true
 BACKED_UP=1
 
 # macOS does not lock a running executable, so replacement is easy; still stop OUR server
-# (matched by its own binary path, not by process name) to avoid a short-lived bind conflict.
-pkill -f "$RADAR_BIN" 2>/dev/null || true
+# (matched by its unique startup flag present only in the server command line) to avoid a
+# short-lived bind conflict, without touching any helper script.
+pkill -f 'prometheus-single-cluster' 2>/dev/null || true
 sleep 0.5
 if ! cp -f "$NEW" "$RADAR_BIN"; then
     [ "$BACKED_UP" -eq 1 ] && cp -f "$BACKUP_DIR/radar.$inst.bak" "$RADAR_BIN" 2>/dev/null || true

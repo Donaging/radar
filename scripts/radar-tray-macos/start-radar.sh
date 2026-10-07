@@ -14,9 +14,9 @@ LOG_FILE="$RADAR_DIR/radar.log"
 
 mkdir -p "$RADAR_DIR"
 
-# Avoid duplicate instances: if OUR server (matched by binary path, not process name)
-# is already running, do nothing (prevents a binding conflict on port 9280).
-if pgrep -f "$RADAR_BIN" >/dev/null 2>&1; then
+# Avoid duplicate instances: match the server by its unique startup flag (present only in the
+# server command line, never in the helper scripts), not by process name or binary path.
+if pgrep -f 'prometheus-single-cluster' >/dev/null 2>&1; then
     exit 0
 fi
 
