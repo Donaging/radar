@@ -161,16 +161,22 @@ try {
 }
 catch {
     # In caso di errore, ripristina i backup e riavvia: non lasciare Radar fermo/parziale
+    $restored = $false
+    $restarted = $false
     if ($backedUp) {
         foreach ($f in @('radar.exe', 'kubectl-radar.exe')) {
             if ($backups.ContainsKey($f) -and (Test-Path $backups[$f])) {
                 Copy-Item $backups[$f] (Join-Path $installDir $f) -Force -ErrorAction SilentlyContinue
             }
         }
+        $restored = $true
     }
     if ($stopped -or $backedUp) {
         Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',('"' + $launcher + '"')) -WindowStyle Hidden
+        $restarted = $true
     }
-    Write-Result "Errore durante la verifica/aggiornamento: $($_.Exception.Message). Binari ripristinati e server riavviato."
+    $actionNote = if ($restored -or $restarted) { ' Binari ripristinati e server riavviato.' }
+                 else { ' Nessuna modifica applicata ai binari.' }
+    Write-Result ("Errore durante la verifica/aggiornamento: " + $_.Exception.Message + "." + $actionNote)
     exit 1
 }

@@ -96,8 +96,9 @@ function Switch-RadarContext([string]$ctxName) {
         $target = if ($cur) { Friendly-Name $cur.name } else { $friendly }
         if ($now -ne $ctxName) {
             # il contesto non ha assunto quello richiesto -> lo switch e' stato rifiutato/fallito
+            $still = if ($before) { (Friendly-Name $before) } else { $target }
             $detail = if ($postErr) { " ($postErr)" } else { '' }
-            $tray.ShowBalloonTip(6000, 'Radar', "Cambio cluster NON riuscito (ancora su $target).$detail", [System.Windows.Forms.ToolTipIcon]::Error)
+            $tray.ShowBalloonTip(6000, 'Radar', "Cambio cluster NON riuscito (attualmente su $still).$detail", [System.Windows.Forms.ToolTipIcon]::Error)
         } else {
             $up = Test-Cluster
             $esito = if ($up) { 'connesso' } else { 'NON raggiungibile' }
@@ -202,6 +203,11 @@ $open.Add_Click({ Start-Process $script:URL })
 $tray.Add_DoubleClick({ Start-Process $script:URL })
 
 $start.Add_Click({
+    # evita la race con l'update asincrono (Radar fermo durante la copia dei binari ~133MB)
+    if ($script:updatePID) {
+        $tray.ShowBalloonTip(2500, 'Radar', 'Aggiornamento in corso: avvio disabilitato fino al termine.', [System.Windows.Forms.ToolTipIcon]::Info)
+        return
+    }
     if (-not (Test-Radar)) {
         # path quotato: gestisce %USERPROFILE% con spazi
         Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',('"' + $script:launcher + '"')) -WindowStyle Hidden
