@@ -84,12 +84,12 @@ $backedUp = $false
 $backups  = @{}
 
 try {
-    # 1) Versione installata
+    # Versione locale: riferimento per decidere se l'update è davvero necessario (evita chiamate di rete superflue)
     $verLine = (& $radarExe --version) 2>&1 | Out-String
     $instVer = '0.0.0'
     if ($verLine -match 'radar\s+v?(\d+(?:\.\d+){1,3})') { $instVer = $Matches[1] }
 
-    # 2) Ultima release GitHub
+    # Fonte di verità della versione più recente upstream: il confronto con l'installata determina se procedere
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/skyhook-io/radar/releases/latest' -Headers @{ 'User-Agent' = 'opencode' } -TimeoutSec 60
     $latestTag = $release.tag_name -replace '^v', ''
 
@@ -98,7 +98,7 @@ try {
         exit 0
     }
 
-    # 3) Download ed estrazione dell'asset della nuova versione
+    # Radar pubblica una sola zip per release con un unico eseguibile: la scarico ed estraggo PRIMA di toccare i binari installati
     $assetName = "radar_v$latestTag`_windows_amd64.zip"
     $asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
     if (-not $asset) { throw "Asset di installazione non trovato: $assetName" }
@@ -135,7 +135,7 @@ try {
     }
     $backedUp = $true
 
-    # 5) Ferma Radar e sostituisci entrambi i binari con il nuovo
+    # Il binario in esecuzione è bloccato da Windows: va fermato per poterlo sostituire; servono ENTRAMBI i nomi perché è lo stesso file
     Get-Process -Name 'radar' -ErrorAction SilentlyContinue | Stop-Process -Force
     $stopped = $true
     Start-Sleep -Milliseconds 500
