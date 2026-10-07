@@ -24,8 +24,8 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>CHANGE/ME/radar-tray.out.log</string>
+    <string>/CHANGE/ME/radar-tray.out.log</string>
     <key>StandardErrorPath</key>
-    <string>CHANGE/ME/radar-tray.err.log</string>
+    <string>/CHANGE/ME/radar-tray.err.log</string>
 </dict>
 </plist>

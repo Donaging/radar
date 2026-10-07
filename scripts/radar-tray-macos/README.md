@@ -29,20 +29,26 @@ indicator** with cluster switching and a version-check / auto-update command.
    ```bash
    chmod +x ~/.radar/start-radar.sh ~/.radar/radar-update.sh
    ```
-3. **Menu-bar app** — copy `radar-tray.py` to `~/.radar/` and install `rumps` (PyObjC):
+3. **Menu-bar app** — copy `radar-tray.py` to `~/.radar/` and install `rumps` (PyObjC) **for the same
+   Python that will run the app** (important for the LaunchAgent, see note below):
    ```bash
    pip3 install --user rumps
+   /usr/bin/python3 -c 'import rumps'   # confirm rumps is importable by the login interpreter
    ```
    Quick manual start while testing:
    ```bash
    python3 ~/.radar/radar-tray.py
    ```
 4. **(Optional) autostart at login** — copy `com.radar.tray.plist` to `~/Library/LaunchAgents/`,
-   edit the three `/CHANGE/ME` paths (script path + log paths), then:
+   edit the **three `/CHANGE/ME` paths** (script path + the two log paths) — they must be
+   **absolute** — then:
    ```bash
    launchctl load ~/Library/LaunchAgents/com.radar.tray.plist
    ```
-   To unload/remove: `launchctl unload ...` and delete the plist.
+   To unload/remove: `launchctl unload ...` and delete the plist. The plist runs `/usr/bin/python3`;
+   if `rumps` was installed for a different interpreter, point `ProgramArguments` at the exact
+   Python that has it (e.g. `/opt/homebrew/bin/python3`), or the logged-in tray will keep
+   restarting without its dependency.
 
 ## Manual control
 ```bash
@@ -65,6 +71,8 @@ bash ~/.radar/radar-update.sh       # check + auto-update (prints result)
 - **Gatekeeper/quarantine**: downloaded binaries carry `com.apple.quarantine`; the update script
   strips it (`xattr -d`), otherwise macOS may block execution.
 - **Two architectures**: `uname -m` selects `arm64` vs `amd64` asset.
+- **Default port assumed**: the helper uses `9280` (web UI + MCP). If the server runs on a custom
+  port, adjust `BASE` and the `radar_up()`/readiness probes in the scripts.
 - This scaffold uses colored dot **PNGs generated at runtime** via AppKit (the macOS menu bar
   renders template icons; verify they display if you prefer monochrome).
 

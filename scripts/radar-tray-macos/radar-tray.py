@@ -86,6 +86,14 @@ def current_cluster():
     return None
 
 
+def current_raw():
+    """Raw (full) name of the current context - for exact comparisons in switching."""
+    for c in contexts():
+        if c.get("isCurrent"):
+            return c.get("name")
+    return None
+
+
 def make_icon_png(name, hexcolor):
     """Draw a filled circle into a 16x16 PNG via AppKit."""
     import AppKit
@@ -168,7 +176,7 @@ class RadarApp(rumps.App):
         ctx = getattr(sender, "_ctx", None)
         if not ctx:
             return
-        before = current_cluster()
+        before = current_raw()
         post_err = ""
         try:
             import urllib.parse
@@ -181,13 +189,13 @@ class RadarApp(rumps.App):
                 # a 500 is expected on unreachable clusters, but the context still changes
                 post_err = " ({})".format(e)
             time.sleep(1.2)
-            after = current_cluster()
-            if after != ctx:
+            after_raw = current_raw()
+            if after_raw != ctx:
                 # the context did not become the requested one -> the switch was rejected/failed
                 still = friendly(before) if before else (friendly(ctx) or "")
                 rumps.notification("Radar", "Cluster switch FAILED (still on {}){}".format(still, post_err), "")
             else:
-                target = after or friendly(ctx)
+                target = friendly(after_raw) or friendly(ctx)
                 ok = cluster_ok()
                 esito = "connected" if ok else "unreachable"
                 rumps.notification("Radar", "Cluster: {} - {}".format(target, esito), "")
@@ -259,7 +267,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return
-    # Ensure the server is running.
+    # The menu bar is meaningless without the server: auto-start it on first launch if it is down.
     if not radar_up():
         subprocess.Popen(["bash", START_SCRIPT])
     RadarApp().run()

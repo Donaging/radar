@@ -14,9 +14,9 @@ LOG_FILE="$RADAR_DIR/radar.log"
 
 mkdir -p "$RADAR_DIR"
 
-# Avoid duplicate instances: if a radar process is already running, do nothing
-# (prevents a binding conflict on port 9280).
-if pgrep -x radar >/dev/null 2>&1; then
+# Avoid duplicate instances: if OUR server (matched by binary path, not process name)
+# is already running, do nothing (prevents a binding conflict on port 9280).
+if pgrep -f "$RADAR_BIN" >/dev/null 2>&1; then
     exit 0
 fi
 
