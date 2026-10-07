@@ -1,17 +1,17 @@
-# radar-update.ps1 — verifica versione Radar ed esegue l'auto-update (se più recente).
-# Uso interno Windows PowerShell 5.1 (powershell.exe).
+# radar-update.ps1 - checks the Radar version and performs the auto-update (if a newer one exists).
+# Internal: requires Windows PowerShell 5.1 (powershell.exe).
 #
-# Flusso:
-#   versione installata -> ultima release GitHub -> se più recente: scarica, estrae,
-#   backup dei binari correnti, ferma Radar, sostituisce i due binari, riavvia e
-#   VERIFICA che il server torni online. In caso di errore ripristina i backup e riavvia.
+# Flow:
+#   installed version -> latest GitHub release -> if newer: download, extract,
+#   back up the current binaries, stop Radar, replace both binaries, restart and
+#   VERIFY that the server comes back online. On error it restores the backups and restarts.
 #
-# L'asset di release contiene UN solo binario (kubectl-radar.exe); lo stesso identico
-# binario viene usato anche come radar.exe -> vanno sostituiti entrambi.
+# A release asset contains a single binary (kubectl-radar.exe); the same identical binary
+# is also used as radar.exe, so BOTH names must be replaced.
 #
-# Uso:
+# Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\radar-update.ps1
-# Parametro -silent: usa solo il file risultato (nessuna stampa a video), per il menu tray.
+# -silent: only writes the result file (no console output), used by the tray menu.
 
 param([switch]$silent)
 
@@ -24,24 +24,24 @@ $backupDir  = Join-Path $env:USERPROFILE '.radar\backup'
 $resultFile = Join-Path $env:USERPROFILE '.radar\last-update-result.txt'
 $launcher   = Join-Path $env:USERPROFILE '.radar\start-radar-silent.ps1'
 
-# Rotazione/pulizia log e temporanei (evita di riempire il disco)
+# Rotate/clean old logs and temp files so they never fill the disk.
 function Clear-StaleRadar {
     $now = Get-Date
-    # cartelle temporanee di install/download/AI piu' vecchie di 7gg
+    # stale install/download/AI temp folders older than 7 days
     foreach ($d in @('radar-install-*', 'radar-update-*', 'radar-ai-*')) {
         Get-Item (Join-Path $env:TEMP $d) -ErrorAction SilentlyContinue |
             Where-Object { $now.Subtract($_.LastWriteTime).TotalDays -gt 7 } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     }
-    # log radar espliciti in Temp\opencode piu' vecchi di 30gg
+    # explicit radar logs in Temp\opencode older than 30 days
     Get-ChildItem (Join-Path $env:TEMP 'opencode') -Filter 'radar-*.log' -ErrorAction SilentlyContinue |
         Where-Object { $now.Subtract($_.LastWriteTime).TotalDays -gt 30 } |
         Remove-Item -Force -ErrorAction SilentlyContinue
-    # download parziali interrotti (.tmp) in ~/.radar/updates piu' vecchi di 2gg
+    # interrupted partial downloads (.tmp) in ~/.radar/updates older than 2 days
     Get-ChildItem (Join-Path $env:USERPROFILE '.radar\updates') -Filter '*.tmp' -ErrorAction SilentlyContinue |
         Where-Object { $now.Subtract($_.LastWriteTime).TotalDays -gt 2 } |
         Remove-Item -Force -ErrorAction SilentlyContinue
-    # tiene il file risultato sotto ~2KB (ultimi caratteri)
+    # keep the result file under ~2 KB (last characters only)
     if (Test-Path $resultFile) {
         $t = Get-Content $resultFile -Raw
         if ($t.Length -gt 2048) { $t.Substring($t.Length - 2048) | Set-Content $resultFile -Encoding UTF8 }
@@ -54,7 +54,7 @@ function Write-Result([string]$m) {
     if (-not $silent) { Write-Output $m }
 }
 
-# Verifica che il server Radar risponda sulla porta 9280 (MCP + web UI)
+# Checks that the Radar server answers on port 9280 (MCP + web UI).
 function Test-RadarUp {
     try {
         $c = New-Object System.Net.Sockets.TcpClient
@@ -78,52 +78,53 @@ function Compare-Version([string]$a, [string]$b) {
     return 0
 }
 
-# Bookkeeping per un ripristino/riavvio sicuro in caso di errore
+# Bookkeeping so an error can safely restore the backups and restart the server.
 $stopped  = $false
 $backedUp = $false
 $backups  = @{}
 
 try {
-    # Versione locale: riferimento per decidere se l'update è davvero necessario (evita chiamate di rete superflue)
+    # Local version: the reference to decide whether an update is really needed (avoids needless network calls).
     $verLine = (& $radarExe --version) 2>&1 | Out-String
     $instVer = '0.0.0'
     if ($verLine -match 'radar\s+v?(\d+(?:\.\d+){1,3})') { $instVer = $Matches[1] }
 
-    # Fonte di verità della versione più recente upstream: il confronto con l'installata determina se procedere
+    # Source of truth for the newest upstream version: comparing it with the local one decides whether to proceed.
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/skyhook-io/radar/releases/latest' -Headers @{ 'User-Agent' = 'opencode' } -TimeoutSec 60
     $latestTag = $release.tag_name -replace '^v', ''
 
     if ((Compare-Version $instVer $latestTag) -ge 0) {
-        Write-Result "Radar già aggiornato: installata $instVer = ultima disponibile $latestTag."
+        Write-Result "Radar already up to date: installed $instVer = latest $latestTag."
         exit 0
     }
 
-    # Radar pubblica una sola zip per release con un unico eseguibile: la scarico ed estraggo PRIMA di toccare i binari installati
+    # Radar publishes one zip per release holding a single executable: download and extract it
+    # BEFORE touching the installed binaries.
     $assetName = "radar_v$latestTag`_windows_amd64.zip"
     $asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
-    if (-not $asset) { throw "Asset di installazione non trovato: $assetName" }
+    if (-not $asset) { throw "Installation asset not found: $assetName" }
 
-    Write-Result "Scaricamento Radar $latestTag da GitHub..."
+    Write-Result "Downloading Radar $latestTag from GitHub..."
     $tmp  = Join-Path $env:TEMP ('radar-update-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     $zip  = Join-Path $tmp $assetName
 
-    # Download robusto: curl (streaming, retry, timeout lungo). Fallback Invoke-WebRequest.
+    # Robust download: curl (streaming, retries, long timeout). Falls back to Invoke-WebRequest.
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (Test-Path $curl) {
         & $curl -L --fail --retry 4 --retry-delay 3 --connect-timeout 30 --max-time 900 --silent --output $zip $asset.browser_download_url
-        if ($LASTEXITCODE -ne 0) { throw "Download fallito (curl exit $LASTEXITCODE). Riprova: probabilmente rete/proxy." }
+        if ($LASTEXITCODE -ne 0) { throw "Download failed (curl exit $LASTEXITCODE). Retry: likely a network/proxy issue." }
     } else {
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing -TimeoutSec 900
     }
-    if (-not (Test-Path $zip) -or (Get-Item $zip).Length -eq 0) { throw "File scaricato vuoto/assente." }
+    if (-not (Test-Path $zip) -or (Get-Item $zip).Length -eq 0) { throw "Downloaded file is empty/missing." }
 
     $exDir = Join-Path $tmp 'ex'
     Expand-Archive -Path $zip -DestinationPath $exDir -Force
     $newBin = Get-ChildItem $exDir -Filter 'kubectl-radar.exe' -Recurse | Select-Object -First 1
-    if (-not $newBin) { throw "Binario kubectl-radar.exe non trovato nell'archivio." }
+    if (-not $newBin) { throw "kubectl-radar.exe not found in the archive." }
 
-    # 4) Backup dei binari correnti (per il ripristino in caso di errore)
+    # Back up the current binaries so an error can restore them.
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     foreach ($f in @('radar.exe', 'kubectl-radar.exe')) {
         $p = Join-Path $installDir $f
@@ -135,14 +136,15 @@ try {
     }
     $backedUp = $true
 
-    # Il binario in esecuzione è bloccato da Windows: va fermato per poterlo sostituire; servono ENTRAMBI i nomi perché è lo stesso file
+    # The running binary is locked by Windows: it must be stopped to be replaced; BOTH names
+    # must be updated because they are the same executable.
     Get-Process -Name 'radar' -ErrorAction SilentlyContinue | Stop-Process -Force
     $stopped = $true
     Start-Sleep -Milliseconds 500
     Copy-Item $newBin.FullName (Join-Path $installDir 'kubectl-radar.exe') -Force
     Copy-Item $newBin.FullName (Join-Path $installDir 'radar.exe') -Force
 
-    # 6) Riavvio silenzioso e verifica che il server torni online (MCP + web UI)
+    # Restart silently and verify the server comes back online (MCP + web UI).
     Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',('"' + $launcher + '"')) -WindowStyle Hidden
     $online = $false
     for ($i = 0; $i -lt 30; $i++) {
@@ -153,14 +155,14 @@ try {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
     if ($online) {
-        Write-Result "Radar aggiornato: $instVer -> $latestTag. Server riavviato e online."
+        Write-Result "Radar updated: $instVer -> $latestTag. Server restarted and online."
     } else {
-        Write-Result "Radar aggiornato: $instVer -> $latestTag, ma il server NON risulta ripartito. Esegui start-radar-silent.ps1."
+        Write-Result "Radar updated: $instVer -> $latestTag, but the server does not appear to be back up. Run start-radar-silent.ps1."
     }
     exit 0
 }
 catch {
-    # In caso di errore, ripristina i backup e riavvia: non lasciare Radar fermo/parziale
+    # On error, restore the backups and restart: never leave Radar stopped or partially updated.
     $restored = $false
     $restarted = $false
     if ($backedUp) {
@@ -175,8 +177,8 @@ catch {
         Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',('"' + $launcher + '"')) -WindowStyle Hidden
         $restarted = $true
     }
-    $actionNote = if ($restored -or $restarted) { ' Binari ripristinati e server riavviato.' }
-                 else { ' Nessuna modifica applicata ai binari.' }
-    Write-Result ("Errore durante la verifica/aggiornamento: " + $_.Exception.Message + "." + $actionNote)
+    $actionNote = if ($restored -or $restarted) { ' Binaries restored and server restarted.' }
+                 else { ' No changes were applied to the binaries.' }
+    Write-Result ("Error during version check/update: " + $_.Exception.Message + "." + $actionNote)
     exit 1
 }
