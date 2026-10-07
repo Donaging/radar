@@ -37,6 +37,17 @@ def get_port():
 
 PORT = get_port()
 BASE = "http://localhost:{port}".format(port=PORT)
+
+
+def _refresh_port():
+    """Re-read the configured port so we pick up ~/.radar/mcp-port once Radar has bound it
+    (Radar writes that file after binding and removes it on shutdown, so it may be absent
+    at login)."""
+    global PORT, BASE
+    PORT = get_port()
+    BASE = "http://localhost:{port}".format(port=PORT)
+
+
 ICON_DIR = os.path.join(RADAR_DIR, "icons")
 START_SCRIPT = os.path.join(RADAR_DIR, "start-radar.sh")
 UPDATE_SCRIPT = os.path.join(RADAR_DIR, "radar-update.sh")
@@ -47,6 +58,7 @@ UA = {"User-Agent": "radar-tray"}
 
 
 def radar_up():
+    _refresh_port()
     try:
         s = socket.socket()
         s.settimeout(1.5)
@@ -197,6 +209,7 @@ class RadarApp(rumps.App):
         try:
             import urllib.parse
 
+            _refresh_port()
             url = BASE + "/api/contexts/" + urllib.parse.quote(ctx, safe="")
             req = urllib.request.Request(url, data=b"", method="POST")
             try:
